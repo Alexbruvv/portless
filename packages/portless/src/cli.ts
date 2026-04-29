@@ -13,6 +13,15 @@ import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./util
 import { syncHostsFile, cleanHostsFile, shouldAutoSyncHosts } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
 import {
+  ensureTailscaleReady,
+  findAvailableServePort,
+  formatTailscaleUrl,
+  getUsedServePorts,
+  registerFunnel,
+  registerServe,
+  unregisterTailscale,
+} from "./tailscale.js";
+import {
   inferProjectName,
   detectWorktreePrefix,
   truncateLabel,
@@ -771,6 +780,10 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
     console.log(
       `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}`
     );
+    if (route.tailscaleUrl) {
+      const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
+      console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
+    }
   }
   console.log();
 }
@@ -935,6 +948,32 @@ async function runApp(
   let store = initialStore;
   console.log(chalk.blue.bold(`\nportless\n`));
 
+  // Check tailscale readiness early, before auto-starting the proxy.
+  // No point starting the proxy if tailscale will fail afterward.
+  const wantsFunnel = process.env.PORTLESS_FUNNEL === "1" || process.env.PORTLESS_FUNNEL === "true";
+  const wantsTailscale =
+    wantsFunnel ||
+    process.env.PORTLESS_TAILSCALE === "1" ||
+    process.env.PORTLESS_TAILSCALE === "true";
+  let tsBaseUrl: string | undefined;
+
+  if (wantsTailscale) {
+    try {
+      const tsReady = ensureTailscaleReady();
+      tsBaseUrl = tsReady.baseUrl;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(colors.red(`Error: ${message}`));
+      if (message.includes("not found")) {
+        console.error(colors.blue("Install Tailscale: https://tailscale.com/download"));
+      } else {
+        console.error(colors.blue("Make sure Tailscale is connected:"));
+        console.error(colors.cyan("  tailscale up"));
+      }
+      process.exit(1);
+    }
+  }
+
   let desired: ProxyDesiredState;
   try {
     desired = resolveProxyDesiredState(lanMode);
@@ -1031,6 +1070,54 @@ async function runApp(
     console.log(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
   }
 
+  // Tailscale sharing: register with tailscale serve (or funnel).
+  // Readiness was already checked at the top of runApp().
+  let tailscaleHttpsPort: number | undefined;
+  let tailscaleUrl: string | undefined;
+
+  if (wantsTailscale && tsBaseUrl) {
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const usedPorts = getUsedServePorts();
+      tailscaleHttpsPort = findAvailableServePort(usedPorts, wantsFunnel ? "funnel" : "serve");
+      try {
+        if (wantsFunnel) {
+          registerFunnel(port, tailscaleHttpsPort);
+        } else {
+          registerServe(port, tailscaleHttpsPort);
+        }
+        break;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        const isConflict = message.includes("already in use");
+        if (isConflict && attempt < maxAttempts) continue;
+        console.error(colors.red(`Error: ${message}`));
+        process.exit(1);
+      }
+    }
+
+    // tailscaleHttpsPort is always assigned: the loop either breaks after
+    // a successful register or exits the process on final failure.
+    tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
+    const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
+    console.log(chalk.green(`  ${label} -> ${tailscaleUrl}`));
+    if (wantsFunnel) {
+      console.log(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
+    } else {
+      console.log(chalk.gray("  (accessible from your tailnet)\n"));
+    }
+
+    try {
+      store.updateRoute(hostname, {
+        tailscaleUrl: tailscaleUrl,
+        tailscaleHttpsPort,
+        tailscaleFunnel: wantsFunnel || undefined,
+      });
+    } catch {
+      // Non-fatal: route display metadata only
+    }
+  }
+
   // Child servers always bind to localhost; the proxy handles cross-device LAN access.
   // Exception: Expo in LAN mode — Metro defaults to LAN and setting HOST=127.0.0.1
   // conflicts with its internal networking, causing HMR WebSocket degradation.
@@ -1086,9 +1173,18 @@ async function runApp(
       // baked-in pinging, making this env var ineffective. Expo handles its
       // own LAN discovery natively.
       ...(lanMode ? { PORTLESS_LAN: "1" } : {}),
+      ...(tailscaleUrl ? { PORTLESS_TAILSCALE_URL: tailscaleUrl } : {}),
       ...caEnv,
     },
     onCleanup: () => {
+      try {
+        unregisterTailscale({
+          tailscaleHttpsPort,
+          tailscaleFunnel: wantsFunnel || undefined,
+        });
+      } catch {
+        // Best-effort cleanup; non-fatal
+      }
       try {
         store.removeRoute(hostname);
       } catch {
@@ -1139,6 +1235,19 @@ function appPortFromEnv(): number | undefined {
     process.exit(1);
   }
   return port;
+}
+
+function applyTailscaleFlag(flag: string): boolean {
+  if (flag === "--tailscale") {
+    process.env.PORTLESS_TAILSCALE = "1";
+    return true;
+  }
+  if (flag === "--funnel") {
+    process.env.PORTLESS_FUNNEL = "1";
+    process.env.PORTLESS_TAILSCALE = "1";
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -1205,9 +1314,13 @@ ${colors.bold("Examples:")}
         process.exit(1);
       }
       name = args[i];
+    } else if (applyTailscaleFlag(args[i])) {
+      // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --name, --force, --app-port, --help"));
+      console.error(
+        colors.blue("Known flags: --name, --force, --app-port, --tailscale, --funnel, --help")
+      );
       process.exit(1);
     }
     i++;
@@ -1240,9 +1353,11 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (applyTailscaleFlag(args[i])) {
+      // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port"));
+      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
       process.exit(1);
     }
     i++;
@@ -1262,9 +1377,11 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (applyTailscaleFlag(args[i])) {
+      // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port"));
+      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
       process.exit(1);
     }
     i++;
@@ -1316,6 +1433,8 @@ ${colors.bold("Examples:")}
   portless run next dev               # -> https://<project>.localhost
   portless run next dev               # in worktree -> https://<worktree>.<project>.localhost
   portless get backend                # -> https://backend.localhost
+  portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
+  portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
 
 ${colors.bold("Configuration (portless.json):")}
   Optional. Portless works out of the box by running the "dev" script
@@ -1366,6 +1485,15 @@ ${colors.bold("LAN mode:")}
   ${colors.cyan("portless proxy start --lan --https")}
   ${colors.cyan("portless proxy start --lan --ip 192.168.1.42")}
 
+${colors.bold("Tailscale sharing:")}
+  Use --tailscale to share your dev server with teammates on your tailnet.
+  Each app is root-mounted on its own Tailscale HTTPS port (443, then 8443,
+  8444, etc.) so no basePath configuration is needed.
+  Use --funnel to expose your dev server to the public internet via
+  Tailscale Funnel. Requires Tailscale CLI to be installed and connected.
+  ${colors.cyan("portless myapp --tailscale next dev")}
+  ${colors.cyan("portless myapp --funnel next dev")}
+
 ${colors.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
                                 Adds worktree prefix in git worktrees
@@ -1382,6 +1510,8 @@ ${colors.bold("Options:")}
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
+  --tailscale                   Share the app on your Tailscale network (tailnet)
+  --funnel                      Share the app publicly via Tailscale Funnel
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -1394,6 +1524,8 @@ ${colors.bold("Environment variables:")}
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
+  PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
+  PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
 
@@ -1402,6 +1534,7 @@ ${colors.bold("Child process environment:")}
   HOST                          Usually 127.0.0.1 (omitted for Expo in LAN mode)
   PORTLESS_URL                  Public URL of the app (e.g. https://myapp.localhost)
   PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
+  PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
   NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
 
 ${colors.bold("Safari / DNS:")}
@@ -1512,6 +1645,19 @@ ${colors.bold("Options:")}
   });
   await stopProxy(store, port, tls);
 
+  // Clean up any tailscale serve/funnel registrations tied to stale routes
+  const routesForClean = store.loadRoutesRaw();
+  for (const route of routesForClean) {
+    if (route.tailscaleHttpsPort) {
+      try {
+        unregisterTailscale(route);
+        console.log(colors.green(`Removed tailscale serve on port ${route.tailscaleHttpsPort}.`));
+      } catch {
+        // Tailscale may not be installed; non-fatal
+      }
+    }
+  }
+
   const stateDirs = collectStateDirsForCleanup();
   for (const stateDir of stateDirs) {
     const caPath = path.join(stateDir, "ca.pem");
@@ -1597,6 +1743,19 @@ ${colors.bold("Options:")}
   if (stale.length === 0) {
     console.log("No orphaned routes found.");
     return;
+  }
+
+  for (const route of stale) {
+    if (route.tailscaleHttpsPort) {
+      try {
+        unregisterTailscale(route);
+        console.log(
+          `  ${route.hostname} - removed tailscale serve on port ${route.tailscaleHttpsPort}`
+        );
+      } catch {
+        // Tailscale CLI may not be installed; non-fatal during prune
+      }
+    }
   }
 
   let killed = 0;
@@ -3226,6 +3385,14 @@ async function main() {
   } else if (typeof autoIpResult === "string") {
     process.env[INTERNAL_LAN_IP_ENV] = autoIpResult;
     process.env.PORTLESS_LAN = "1";
+  }
+
+  if (stripGlobalFlag("--tailscale", false)) {
+    process.env.PORTLESS_TAILSCALE = "1";
+  }
+  if (stripGlobalFlag("--funnel", false)) {
+    process.env.PORTLESS_FUNNEL = "1";
+    process.env.PORTLESS_TAILSCALE = "1";
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.
