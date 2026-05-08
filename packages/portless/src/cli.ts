@@ -95,6 +95,7 @@ import {
   hasTurboConfig,
 } from "./turbo.js";
 import type { ManifestEntry } from "./turbo.js";
+import { buildServiceUninstallSudoArgs, handleService, tryUninstallService } from "./service.js";
 
 const chalk = colors;
 
@@ -368,6 +369,36 @@ function sudoStop(port: number): boolean {
   const stopArgs = [process.execPath, getEntryScript(), "proxy", "stop", "-p", String(port)];
   console.log(colors.yellow("Proxy is running as root. Elevating with sudo to stop it..."));
   const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...stopArgs], {
+    stdio: "inherit",
+    timeout: SUDO_SPAWN_TIMEOUT_MS,
+  });
+  return result.status === 0;
+}
+
+function runCleanWithSudo(reason: string): boolean {
+  console.log(colors.yellow(`${reason} Requesting sudo...`));
+  const home = process.env.HOME;
+  const result = spawnSync(
+    "sudo",
+    [
+      "env",
+      ...collectPortlessEnvArgs(),
+      ...(home ? [`HOME=${home}`] : []),
+      process.execPath,
+      getEntryScript(),
+      "clean",
+    ],
+    {
+      stdio: "inherit",
+      timeout: SUDO_SPAWN_TIMEOUT_MS,
+    }
+  );
+  return result.status === 0;
+}
+
+function runServiceUninstallWithSudo(reason: string): boolean {
+  console.log(colors.yellow(`${reason} Requesting sudo...`));
+  const result = spawnSync("sudo", buildServiceUninstallSudoArgs(getEntryScript()), {
     stdio: "inherit",
     timeout: SUDO_SPAWN_TIMEOUT_MS,
   });
@@ -1418,6 +1449,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
   ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon)
   ${colors.cyan("portless proxy stop")}              Stop the proxy
+  ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
@@ -1435,6 +1467,7 @@ ${colors.bold("Examples:")}
   portless myapp next dev             # -> https://myapp.localhost
   portless run next dev               # -> https://<project>.localhost
   portless run next dev               # in worktree -> https://<worktree>.<project>.localhost
+  portless service install            # Start HTTPS proxy on OS startup
   portless get backend                # -> https://backend.localhost
   portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
@@ -1555,7 +1588,7 @@ ${colors.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
 
 ${colors.bold("Reserved names:")}
-  run, get, alias, hosts, list, trust, clean, prune, proxy are subcommands and
+  run, get, alias, hosts, list, trust, clean, prune, proxy, service are subcommands and
   cannot be used as app names directly. Use "portless run" to infer the name,
   or "portless --name <name>" to force any name including reserved ones.
 `);
@@ -1617,10 +1650,11 @@ async function handleClean(args: string[]): Promise<void> {
     console.log(`
 ${colors.bold("portless clean")} - Remove portless artifacts from this machine.
 
-Stops the proxy if it is running, removes the local CA from the OS trust store
-when it was installed by portless, deletes known files under state directories
-(~/.portless, the system state directory, and PORTLESS_STATE_DIR when set),
-and removes the portless block from ${HOSTS_DISPLAY}.
+Stops the proxy if it is running, uninstalls the startup service if installed,
+removes the local CA from the OS trust store when it was installed by portless,
+deletes known files under state directories (~/.portless, the system state
+directory, and PORTLESS_STATE_DIR when set), and removes the portless block
+from ${HOSTS_DISPLAY}.
 
 Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed.
@@ -1641,6 +1675,26 @@ ${colors.bold("Options:")}
     console.error(colors.red(`Error: Unknown argument "${args[1]}".`));
     console.error(colors.cyan("  portless clean --help"));
     process.exit(1);
+  }
+
+  const serviceResult = tryUninstallService(getEntryScript());
+  if (serviceResult.removed) {
+    console.log(colors.green("Removed startup service."));
+  } else if (serviceResult.needsElevation && !isWindows && (process.getuid?.() ?? -1) !== 0) {
+    if (
+      !runServiceUninstallWithSudo("Removing the startup service requires elevated privileges.")
+    ) {
+      console.error(colors.red("Failed to remove startup service with sudo."));
+      process.exit(1);
+    }
+  } else if (serviceResult.error) {
+    const adminHint = isWindows ? " Run as Administrator and try again." : "";
+    const message = `Could not remove startup service: ${serviceResult.error}${adminHint}`;
+    if (serviceResult.installed) {
+      console.error(colors.red(message));
+      process.exit(1);
+    }
+    console.warn(colors.yellow(message));
   }
 
   console.log(colors.cyan("Stopping proxy if it is running..."));
@@ -1690,18 +1744,7 @@ ${colors.bold("Options:")}
   if (cleanHostsFile()) {
     console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
   } else if (!isWindows && process.getuid?.() !== 0) {
-    console.log(
-      colors.yellow(`Updating ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`)
-    );
-    const result = spawnSync(
-      "sudo",
-      ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "clean"],
-      {
-        stdio: "inherit",
-        timeout: SUDO_SPAWN_TIMEOUT_MS,
-      }
-    );
-    if (result.status !== 0) {
+    if (!runCleanWithSudo(`Updating ${HOSTS_DISPLAY} requires elevated privileges.`)) {
       console.error(colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo portless clean`));
       process.exit(1);
     }
@@ -3411,7 +3454,7 @@ async function main() {
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, trust, clean, prune, proxy).
+  // subcommand (run, alias, hosts, list, trust, clean, prune, proxy, service).
   if (args[0] === "--name") {
     args.shift();
     if (!args[0]) {
@@ -3450,7 +3493,7 @@ async function main() {
     skipPortless &&
     (isRunCommand ||
       args.length === 0 ||
-      (args.length >= 2 && args[0] !== "proxy" && args[0] !== "clean"))
+      (args.length >= 2 && args[0] !== "proxy" && args[0] !== "clean" && args[0] !== "service"))
   ) {
     const parsed = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
     let commandArgs = parsed.commandArgs;
@@ -3468,7 +3511,7 @@ async function main() {
     return;
   }
 
-  // Global dispatch: help, version, trust, clean, prune, list, alias, hosts, proxy
+  // Global dispatch: help, version, trust, clean, prune, list, alias, hosts, proxy, service
   // When `run` is used, skip these so args like "list" or "--help" are treated
   // as child-command tokens, not portless subcommands.
   if (!isRunCommand) {
@@ -3517,6 +3560,10 @@ async function main() {
     }
     if (args[0] === "proxy") {
       await handleProxy(args);
+      return;
+    }
+    if (args[0] === "service") {
+      await handleService(args, { entryScript: getEntryScript() });
       return;
     }
   }
