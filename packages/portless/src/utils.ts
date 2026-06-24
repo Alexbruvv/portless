@@ -30,6 +30,17 @@ export function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   );
 }
 
+/** Return whether a process exists, treating permission denial as alive. */
+export function isProcessAlive(pid: number): boolean {
+  if (pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return isErrnoException(err) && err.code === "EPERM";
+  }
+}
+
 /**
  * Escape HTML special characters to prevent XSS.
  */

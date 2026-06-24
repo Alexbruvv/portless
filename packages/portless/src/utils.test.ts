@@ -1,5 +1,9 @@
-import { describe, it, expect } from "vitest";
-import { escapeHtml, formatUrl, isErrnoException, parseHostname } from "./utils.js";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { escapeHtml, formatUrl, isErrnoException, isProcessAlive, parseHostname } from "./utils.js";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe("escapeHtml", () => {
   it("escapes angle brackets", () => {
@@ -54,6 +58,41 @@ describe("isErrnoException", () => {
     const err = new Error("fail");
     (err as unknown as Record<string, unknown>).code = 42;
     expect(isErrnoException(err)).toBe(false);
+  });
+});
+
+describe("isProcessAlive", () => {
+  it("returns true when signal 0 succeeds", () => {
+    vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    expect(isProcessAlive(123)).toBe(true);
+  });
+
+  it("treats EPERM as an alive process", () => {
+    const err = new Error("permission denied") as NodeJS.ErrnoException;
+    err.code = "EPERM";
+    vi.spyOn(process, "kill").mockImplementation(() => {
+      throw err;
+    });
+
+    expect(isProcessAlive(123)).toBe(true);
+  });
+
+  it("returns false when the process does not exist", () => {
+    const err = new Error("missing") as NodeJS.ErrnoException;
+    err.code = "ESRCH";
+    vi.spyOn(process, "kill").mockImplementation(() => {
+      throw err;
+    });
+
+    expect(isProcessAlive(123)).toBe(false);
+  });
+
+  it("returns false for non-positive PIDs", () => {
+    const spy = vi.spyOn(process, "kill");
+
+    expect(isProcessAlive(0)).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 
