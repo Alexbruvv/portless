@@ -52,13 +52,8 @@ export function ensureEnvLoader(baseDir: string = USER_STATE_DIR): void {
   fs.writeFileSync(target, source, { mode: 0o644 });
 }
 
-export interface ManifestEntry {
-  PORT: string;
-  HOST: string;
-  PORTLESS_URL: string;
-  __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS?: string;
-  NODE_EXTRA_CA_CERTS?: string;
-}
+/** Env vars written to the turbo dev manifest for a package directory. */
+export type ManifestEntry = Record<string, string>;
 
 /**
  * Write the dev-manifest.json mapping package directories to env vars.

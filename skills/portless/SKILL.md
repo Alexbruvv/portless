@@ -167,7 +167,20 @@ Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4
 
 Use `portless proxy start --tld localhost --tld test` to serve the same app names under multiple TLDs from one proxy. `PORTLESS_URL` uses the first configured TLD. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
 
-Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` flag and, when needed, a matching `--host` CLI flag.
+Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native, and `php artisan serve`), portless auto-injects the correct `--port` flag and, when needed, a matching `--host` CLI flag.
+
+### Laravel
+
+Portless detects Laravel when `artisan` exists and `composer.json` requires `laravel/framework`. It then sets:
+
+| Variable      | Description                                  |
+| ------------- | -------------------------------------------- |
+| `APP_URL`     | Public URL (same as `PORTLESS_URL`)          |
+| `ASSET_URL`   | Same as `APP_URL`                            |
+| `SERVER_PORT` | Assigned listen port for `php artisan serve` |
+| `SERVER_HOST` | `127.0.0.1`                                  |
+
+Bare `portless` prefers a matching Composer script (default `dev` via `composer run dev`), then falls back to `php artisan serve`. When using `artisan serve` behind the HTTPS proxy, trust proxies in `bootstrap/app.php` (e.g. `$middleware->trustProxies(at: '*')`) so generated URLs stay on `https`.
 
 ### State directory
 
@@ -380,7 +393,7 @@ portless proxy start -p 8080
 
 ### Framework not respecting PORT
 
-Portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag for frameworks that ignore the `PORT` env var: **Vite**, **VitePlus** (`vp`), **Astro**, **React Router**, **Angular**, **Expo**, and **React Native**. SvelteKit uses Vite internally and is handled automatically.
+Portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag for frameworks that ignore the `PORT` env var: **Vite**, **VitePlus** (`vp`), **Astro**, **React Router**, **Angular**, **Expo**, **React Native**, and **`php artisan serve`**. SvelteKit uses Vite internally and is handled automatically.
 
 For other frameworks that don't read `PORT`, pass the port manually:
 

@@ -849,6 +849,46 @@ describe("injectFrameworkFlags", () => {
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["yarn", "--silent"]);
   });
+
+  it("injects --port and --host for php artisan serve", () => {
+    const args = ["php", "artisan", "serve"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["php", "artisan", "serve", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("injects --port and --host for artisan serve", () => {
+    const args = ["artisan", "serve"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["artisan", "serve", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("skips artisan injection when --port and --host are already present", () => {
+    const args = ["php", "artisan", "serve", "--port", "8000", "--host", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["php", "artisan", "serve", "--port", "8000", "--host", "0.0.0.0"]);
+  });
+
+  it("does not inject for php artisan migrate", () => {
+    const args = ["php", "artisan", "migrate"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["php", "artisan", "migrate"]);
+  });
+
+  it("injects for php with flags before artisan serve", () => {
+    const args = ["php", "-d", "memory_limit=512M", "artisan", "serve"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "php",
+      "-d",
+      "memory_limit=512M",
+      "artisan",
+      "serve",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
 });
 
 describe("DEFAULT_TLD", () => {

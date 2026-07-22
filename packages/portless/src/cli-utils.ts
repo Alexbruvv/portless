@@ -1079,12 +1079,45 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
 }
 
 /**
+ * True when `commandArgs` is `php artisan serve` or `artisan serve`
+ * (with optional PHP flags between `php` and `artisan`).
+ */
+function isArtisanServe(commandArgs: string[]): boolean {
+  if (commandArgs.length === 0) return false;
+
+  let artisanIdx = -1;
+  for (let i = 0; i < commandArgs.length; i++) {
+    if (path.basename(commandArgs[i]) === "artisan") {
+      artisanIdx = i;
+      break;
+    }
+  }
+  if (artisanIdx < 0) return false;
+
+  if (artisanIdx > 0) {
+    const first = path.basename(commandArgs[0]);
+    if (first !== "php" && first !== "php.exe") return false;
+  }
+
+  for (let i = artisanIdx + 1; i < commandArgs.length; i++) {
+    const arg = commandArgs[i];
+    if (arg === "serve") return true;
+    if (arg.startsWith("-")) continue;
+    return false;
+  }
+  return false;
+}
+
+/**
  * Check if `commandArgs` invokes a framework that ignores `PORT` and, if so,
  * mutate the array in-place to append the correct CLI flags so the app
  * listens on the expected port and address.
  *
  * Handles both direct invocation (`vite dev`) and invocation via package
  * runners (`bunx --bun vite dev`, `npx vite dev`, `yarn dlx vite dev`).
+ *
+ * Also handles `php artisan serve` / `artisan serve`, which read
+ * `SERVER_PORT` / `SERVER_HOST` but benefit from explicit `--port` / `--host`.
  *
  * We also inject `--host 127.0.0.1` so frameworks bind IPv4 loopback
  * predictably. The proxy itself dials both loopback families (see
@@ -1098,6 +1131,16 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  * server local.
  */
 export function injectFrameworkFlags(commandArgs: string[], port: number): void {
+  if (isArtisanServe(commandArgs)) {
+    if (!commandArgs.includes("--port")) {
+      commandArgs.push("--port", port.toString());
+    }
+    if (!commandArgs.includes("--host")) {
+      commandArgs.push("--host", "127.0.0.1");
+    }
+    return;
+  }
+
   const basename = findFrameworkBasename(commandArgs);
   if (!basename) return;
 

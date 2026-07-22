@@ -119,6 +119,11 @@ import {
   hasTurboConfig,
 } from "./turbo.js";
 import type { ManifestEntry } from "./turbo.js";
+import {
+  buildChildEnv,
+  buildChildEnvOverrides,
+  resolveFrameworkDefaultCommand,
+} from "./frameworks/index.js";
 import { buildServiceUninstallSudoArgs, handleService, tryUninstallService } from "./service.js";
 
 const chalk = colors;
@@ -474,10 +479,6 @@ function buildHostnames(name: string, tlds: readonly string[]): string[] {
 
 function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
   return hostnames.map((hostname) => formatUrl(hostname, proxyPort, tls));
-}
-
-function formatViteAllowedHosts(tlds: readonly string[]): string {
-  return tlds.map((configuredTld) => `.${configuredTld}`).join(",");
 }
 
 function formatBindEndpoint(host: string, port: number): string {
@@ -1465,27 +1466,25 @@ async function runApp(
   }
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
+  // and for php artisan serve.
   injectFrameworkFlags(commandArgs, port);
 
-  // Point Node.js at the portless CA so server-side fetches (e.g. Next.js
-  // Server Components) trust portless-proxied HTTPS services. Node.js does
-  // not use the system trust store, so without this env var it rejects the
-  // portless CA as "self-signed certificate in certificate chain".
-  // Respect any value the user already set. Note: we check process.env here
-  // rather than the constructed child env because the child env inherits from
-  // process.env via spread. If a future code path injects NODE_EXTRA_CA_CERTS
-  // into the child env independently, this guard would need updating.
-  const caEnv: Record<string, string> = {};
-  if (tls && !process.env.NODE_EXTRA_CA_CERTS) {
-    const caPath = path.join(stateDir, "ca.pem");
-    if (fs.existsSync(caPath)) {
-      caEnv.NODE_EXTRA_CA_CERTS = caPath;
-    }
-  }
+  const childEnv = buildChildEnv({
+    port,
+    url: finalUrl,
+    host: hostBind,
+    tlds,
+    tls,
+    stateDir,
+    lanMode,
+    tailscaleUrl,
+    ngrokUrl,
+    cwd: process.cwd(),
+  });
 
   // Run the command
-  const caFragment = caEnv.NODE_EXTRA_CA_CERTS
-    ? ` NODE_EXTRA_CA_CERTS="${caEnv.NODE_EXTRA_CA_CERTS}"`
+  const caFragment = childEnv.NODE_EXTRA_CA_CERTS
+    ? ` NODE_EXTRA_CA_CERTS="${childEnv.NODE_EXTRA_CA_CERTS}"`
     : "";
   console.log(
     chalk.gray(
@@ -1494,20 +1493,7 @@ async function runApp(
   );
 
   spawnCommand(commandArgs, {
-    env: {
-      ...process.env,
-      PORT: port.toString(),
-      ...(hostBind ? { HOST: hostBind } : {}),
-      PORTLESS_URL: finalUrl,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: formatViteAllowedHosts(tlds),
-      // Note: EXPO_PACKAGER_PROXY_URL is not used — expo-dev-client removed
-      // baked-in pinging, making this env var ineffective. Expo handles its
-      // own LAN discovery natively.
-      ...(lanMode ? { PORTLESS_LAN: "1" } : {}),
-      ...(tailscaleUrl ? { PORTLESS_TAILSCALE_URL: tailscaleUrl } : {}),
-      ...(ngrokUrl ? { PORTLESS_NGROK_URL: ngrokUrl } : {}),
-      ...caEnv,
-    },
+    env: childEnv,
     onCleanup: () => {
       stoppingNgrok = true;
       stopNgrokProcess(ngrokProcess?.child);
@@ -1912,6 +1898,10 @@ ${colors.bold("Child process environment:")}
   PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
   PORTLESS_NGROK_URL            ngrok URL of the app (when --ngrok is active)
   NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
+  APP_URL                       Public URL (set for Laravel apps)
+  ASSET_URL                     Public asset URL (set for Laravel apps)
+  SERVER_PORT                   Listen port for php artisan serve (Laravel)
+  SERVER_HOST                   Listen host for php artisan serve (Laravel)
 
 ${colors.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
@@ -3422,7 +3412,7 @@ async function handleDefaultMode(
 
   const appConfig = loadAppConfig(cwd);
   const scriptName = globalScript ?? appConfig?.script ?? "dev";
-  if (hasScript(scriptName, cwd)) {
+  if (resolveFrameworkDefaultCommand(cwd, scriptName) || hasScript(scriptName, cwd)) {
     await handleDefaultSingle(cwd, scriptName, appConfig);
     return true;
   }
@@ -3438,7 +3428,8 @@ async function handleDefaultSingle(
   scriptName: string,
   appConfig: AppConfig | null
 ): Promise<void> {
-  const resolved = resolveScriptCommand(scriptName, cwd);
+  const resolved =
+    resolveFrameworkDefaultCommand(cwd, scriptName) ?? resolveScriptCommand(scriptName, cwd);
   if (!resolved) {
     console.error(colors.red(`Error: No "${scriptName}" script found in package.json.`));
     process.exit(1);
@@ -3576,20 +3567,18 @@ async function spawnProxiedApp(
 
     addRoutes(store, hostnames, appPort, process.pid);
 
-    env = {
-      ...pkgEnv,
-      PORT: String(appPort),
-      HOST: "127.0.0.1",
-      PORTLESS_URL: url,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: formatViteAllowedHosts(tlds),
-    };
-
-    if (tls) {
-      const caPath = path.join(stateDir, "ca.pem");
-      if (fs.existsSync(caPath)) {
-        env.NODE_EXTRA_CA_CERTS = caPath;
-      }
-    }
+    env = buildChildEnv(
+      {
+        port: appPort,
+        url,
+        host: "127.0.0.1",
+        tlds,
+        tls,
+        stateDir,
+        cwd: app.pkg.dir,
+      },
+      pkgEnv
+    );
   }
 
   const child = spawnChildProcess(app.commandArgs, env, app.pkg.dir);
@@ -3832,19 +3821,16 @@ async function runWithTurbo(
     addRoutes(store, hostnames, appPort, process.pid);
     routes.push({ hostnames });
 
-    const entry: ManifestEntry = {
-      PORT: String(appPort),
-      HOST: "127.0.0.1",
-      PORTLESS_URL: url,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: formatViteAllowedHosts(tlds),
-    };
-    if (tls) {
-      const caPath = path.join(stateDir, "ca.pem");
-      if (fs.existsSync(caPath)) {
-        entry.NODE_EXTRA_CA_CERTS = caPath;
-      }
-    }
-    manifest[app.pkg.dir] = entry;
+    manifest[app.pkg.dir] = buildChildEnvOverrides({
+      port: appPort,
+      url,
+      host: "127.0.0.1",
+      tlds,
+      tls,
+      stateDir,
+      cwd: app.pkg.dir,
+      existingCaCerts: process.env.NODE_EXTRA_CA_CERTS,
+    });
   }
 
   ensureEnvLoader();
@@ -4011,7 +3997,9 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
 
   if (parsed.commandArgs.length === 0) {
     const scriptName = globalScript ?? appConfig?.script ?? "dev";
-    const resolved = resolveScriptCommand(scriptName, process.cwd());
+    const resolved =
+      resolveFrameworkDefaultCommand(process.cwd(), scriptName) ??
+      resolveScriptCommand(scriptName, process.cwd());
     if (resolved) {
       parsed.commandArgs = resolved;
     }
@@ -4272,7 +4260,9 @@ async function main() {
     if (commandArgs.length === 0 && (isRunCommand || args.length === 0)) {
       const appConfig = loadAppConfig();
       const scriptName = globalScript ?? appConfig?.script ?? "dev";
-      const resolved = resolveScriptCommand(scriptName, process.cwd());
+      const resolved =
+        resolveFrameworkDefaultCommand(process.cwd(), scriptName) ??
+        resolveScriptCommand(scriptName, process.cwd());
       if (resolved) commandArgs = resolved;
     }
     if (commandArgs.length === 0) {

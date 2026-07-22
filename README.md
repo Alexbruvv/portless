@@ -32,7 +32,7 @@ portless myapp next dev
 
 HTTPS with HTTP/2 is enabled by default. On first run, portless generates a local CA, trusts it, and binds port 443 (auto-elevates with sudo on macOS/Linux). Use `--no-tls` for plain HTTP.
 
-The proxy auto-starts when you run an app. A random port (4000-4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
+The proxy auto-starts when you run an app. A random port (4000-4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native, and `php artisan serve`), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
 
 When auto-starting, portless reuses the configuration (port, TLS, TLDs) from the most recent proxy run, so a restart or reboot does not silently revert to defaults. Explicit env vars (`PORTLESS_PORT`, `PORTLESS_HTTPS`, etc.) always take priority.
 
@@ -299,6 +299,8 @@ LAN mode depends on the system mDNS tools that portless already spawns: macOS sh
 
 ### Framework notes
 
+- **Laravel**: detected when `artisan` and `composer.json` with `laravel/framework` are present. Portless sets `APP_URL`, `ASSET_URL`, `SERVER_PORT`, and `SERVER_HOST` to match the public URL and listen port. Bare `portless` prefers a matching Composer script (default `dev`), then falls back to `php artisan serve`. Direct `php artisan serve` also gets `--port` / `--host`. When using `artisan serve` behind HTTPS, trust the proxy in `bootstrap/app.php` (e.g. `$middleware->trustProxies(at: '*')`) so Laravel sees `https` correctly.
+
 - **Next.js**: add your `.local` hostnames to `allowedDevOrigins`:
 
   ```js
@@ -439,6 +441,10 @@ PORTLESS_URL                     Primary public URL (e.g. https://myapp.localhos
 PORTLESS_TAILSCALE_URL           Tailscale URL of the app (when --tailscale is active)
 PORTLESS_NGROK_URL               ngrok URL of the app (when --ngrok is active)
 NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)
+APP_URL                          Public URL (set for Laravel apps)
+ASSET_URL                        Public asset URL (set for Laravel apps)
+SERVER_PORT                      Listen port for php artisan serve (Laravel)
+SERVER_HOST                      Listen host for php artisan serve (Laravel)
 ```
 
 > **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
