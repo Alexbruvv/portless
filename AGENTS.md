@@ -43,7 +43,7 @@ To prepare a release:
 5. Add a matching entry to `apps/docs/src/app/changelog/page.mdx`
 6. Open a PR and merge to `main`
 
-CI compares the version in `packages/portless/package.json` to what's on npm. If it differs, it builds, publishes, and creates the GitHub release automatically. The release body is extracted from the content between the markers.
+CI compares the version in `packages/portless/package.json` to `@a2xdev/portless` on npm. If it differs, it builds, publishes, and creates the GitHub release automatically. The release body is extracted from the content between the markers.
 
 ## Windows Debugging
 

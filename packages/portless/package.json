@@ -1,5 +1,5 @@
 {
-  "name": "portless",
+  "name": "@a2xdev/portless",
   "version": "0.15.4",
   "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
   "type": "module",
@@ -25,6 +25,9 @@
     "linux",
     "win32"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
@@ -42,15 +45,15 @@
     "proxy",
     "localhost"
   ],
-  "author": "Vercel Labs",
+  "author": "a2xdev",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/vercel-labs/portless.git"
+    "url": "https://github.com/Alexbruvv/portless.git"
   },
-  "homepage": "https://portless.sh",
+  "homepage": "https://github.com/Alexbruvv/portless",
   "bugs": {
-    "url": "https://github.com/vercel-labs/portless/issues"
+    "url": "https://github.com/Alexbruvv/portless/issues"
   },
   "devDependencies": {
     "@types/node": "^24.12.4",

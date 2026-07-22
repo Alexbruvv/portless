@@ -390,13 +390,17 @@ function getEntryScript(): string {
 
 /**
  * Check whether portless is installed as a project dependency by walking
- * up from cwd looking for node_modules/portless. Used to distinguish a
- * local `npx portless` (allowed) from a one-off download (blocked).
+ * up from cwd looking for node_modules/@a2xdev/portless (or legacy
+ * node_modules/portless). Used to distinguish a local `npx portless`
+ * (allowed) from a one-off download (blocked).
  */
 function isLocallyInstalled(): boolean {
   let dir = process.cwd();
   for (;;) {
-    if (fs.existsSync(path.join(dir, "node_modules", "portless", "package.json"))) {
+    if (
+      fs.existsSync(path.join(dir, "node_modules", "@a2xdev", "portless", "package.json")) ||
+      fs.existsSync(path.join(dir, "node_modules", "portless", "package.json"))
+    ) {
       return true;
     }
     const parent = path.dirname(dir);
@@ -1737,8 +1741,8 @@ Eliminates port conflicts, memorizing port numbers, and cookie/storage
 clashes by giving each dev server a stable .localhost URL.
 
 ${colors.bold("Install:")}
-  ${colors.cyan("npm install -g portless")}          Global (recommended)
-  ${colors.cyan("npm install -D portless")}          Project dev dependency
+  ${colors.cyan("npm install -g @a2xdev/portless")}  Global (recommended)
+  ${colors.cyan("npm install -D @a2xdev/portless")}  Project dev dependency
 
 ${colors.bold("Requirements:")}
   Node.js 24+
@@ -4136,8 +4140,8 @@ async function main() {
   if ((isNpx || isPnpmDlx) && !isLocallyInstalled()) {
     console.error(colors.red("Error: portless should not be run via npx or pnpm dlx."));
     console.error(colors.blue("Install globally or as a project dependency:"));
-    console.error(colors.cyan("  npm install -g portless"));
-    console.error(colors.cyan("  npm install -D portless"));
+    console.error(colors.cyan("  npm install -g @a2xdev/portless"));
+    console.error(colors.cyan("  npm install -D @a2xdev/portless"));
     process.exit(1);
   }
 
